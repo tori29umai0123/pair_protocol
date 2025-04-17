@@ -7,6 +7,7 @@ from modules.room import Room
 from modules.game_state import GameState
 from modules.llm_interface import LLMInterface
 import pandas as pd
+import datetime
 
 # 設定読み込み
 def load_config():
@@ -752,7 +753,11 @@ def common_life_ui(game_state, llm_interface):
         gr.Markdown("各部屋での共同生活の描写を生成します。感情変化は自動的に適用されます。")
         
         # 部屋選択
-        room_select = gr.Radio(label="部屋を選択", choices=["部屋1", "部屋2", "部屋3"], value="部屋1")
+        room_select = gr.Radio(
+            label="部屋を選択", 
+            choices=["部屋1", "部屋2", "部屋3"], 
+            value="部屋1"
+        )
         
         # 描写表示エリア
         description_area = gr.Textbox(label="共同生活の描写", lines=20)
@@ -761,23 +766,41 @@ def common_life_ui(game_state, llm_interface):
         emotion_changes = gr.Textbox(label="感情変化", lines=5)
         
         # エネルギー表示（読み取り専用）
-        energy_display = gr.Textbox(label="現在のノウアエネルギー", value=str(game_state.noua_energy))
+        energy_display = gr.Textbox(
+            label="現在のノウアエネルギー",
+            value=str(game_state.noua_energy)
+        )
+        
+        # 生成状態表示
+        status_display = gr.Textbox(
+            label="生成状態",
+            value="",
+            interactive=False
+        )
         
         # 生成ボタン
         generate_btn = gr.Button("描写を生成（感情変化も自動適用）")
+        
         # イベントハンドラ
         def generate_description(room_name):
             room_id = int(room_name[-1])  # "部屋1" -> 1
             
-            # 既に生成済みなら取得
+            # 既に生成済みかチェック
             if game_state.turn in game_state.life_results and room_id in game_state.life_results[game_state.turn]:
-                description = game_state.life_results[game_state.turn][room_id]["description"]
-                emotion_text = game_state.life_results[game_state.turn][room_id].get("emotion_text", "感情変化情報がありません。")
-                return description, emotion_text, str(game_state.noua_energy)
+                return (
+                    game_state.life_results[game_state.turn][room_id]["description"],
+                    game_state.life_results[game_state.turn][room_id].get("emotion_text", "感情変化情報がありません。"),
+                    str(game_state.noua_energy),
+                    f"この部屋の描写は既に生成済みです（ターン{game_state.turn}）"
+                )
             
             # 生成
             room = game_state.rooms[room_id]
-            description = llm_interface.generate_life_description(room, list(game_state.characters.values()), game_state.turn)
+            description = llm_interface.generate_life_description(
+                room,
+                list(game_state.characters.values()),
+                game_state.turn
+            )
             
             # 結果を保存
             if game_state.turn not in game_state.life_results:
@@ -809,6 +832,21 @@ def common_life_ui(game_state, llm_interface):
             energy = game_state.calculate_noua_energy()
             game_state.noua_energy = energy
             
+            # ログの保存
+            log_text = f"""部屋{room_id}の共同生活描写
+住人：
+- {[char.name for char in room.occupants]}
+
+描写：
+{description}
+
+感情変化：
+{emotion_text}
+
+エネルギー：{energy}
+"""
+            save_log(game_state, log_text, f"room{room_id}_life")
+            
             # 結果を保存（適用済みフラグも含む）
             game_state.life_results[game_state.turn][room_id] = {
                 "description": description,
@@ -817,17 +855,29 @@ def common_life_ui(game_state, llm_interface):
                 "applied": True  # 自動適用済み
             }
             
-            return description, emotion_text, str(energy)
+            return (
+                description,
+                emotion_text,
+                str(energy),
+                f"描写を生成し、ログに保存しました（ターン{game_state.turn}、部屋{room_id}）"
+            )
+        
+        # イベント関連付け
+        generate_btn.click(
+            fn=generate_description,
+            inputs=[room_select],
+            outputs=[description_area, emotion_changes, energy_display, status_display]
+        )
         
         def format_emotion_changes(emotion_result):
-            """感情変化データを読みやすい形式に整形"""
+            """感情変化データを統一された形式で表示"""
             if "error" in emotion_result:
                 return f"感情変化の抽出エラー: {emotion_result['error']}"
             
             if "emotion_changes" not in emotion_result or not emotion_result["emotion_changes"]:
                 return "感情変化を抽出できませんでした。"
             
-            emotion_text = "--- 感情変化の要約 ---\n"
+            formatted_text = "【感情変化】\n"
             for change in emotion_result["emotion_changes"]:
                 from_char = change["from"]
                 to_char = change["to"]
@@ -839,42 +889,30 @@ def common_life_ui(game_state, llm_interface):
                 love_sign = "+" if love_change > 0 else ("-" if love_change < 0 else "±")
                 hate_sign = "+" if hate_change > 0 else ("-" if hate_change < 0 else "±")
                 
-                # 絶対値を使用し、0の場合は0と表示
+                # 値が0の場合は±0と表示
                 love_value = abs(love_change) if love_change != 0 else 0
                 hate_value = abs(hate_change) if hate_change != 0 else 0
                 
-                emotion_text += f"- {from_char} → {to_char}: {reason} (愛情{love_sign}{love_value}/憎悪{hate_sign}{hate_value})\n"
+                formatted_text += f"- {from_char} → {to_char}: {reason} (愛情{love_sign}{love_value}/憎悪{hate_sign}{hate_value})\n"
             
-            return emotion_text
+            return formatted_text
         
-        # 次のフェーズへ
+        # 次のフェーズへ進む関数
         def proceed_to_next_phase():
-            # 全部屋の感情変化が適用されているか確認
-            all_applied = True
-            if game_state.turn in game_state.life_results:
-                for room_id in range(1, 4):
-                    if (room_id not in game_state.life_results[game_state.turn] or 
-                        not game_state.life_results[game_state.turn][room_id]["applied"]):
-                        all_applied = False
-                        break
-            else:
-                all_applied = False
-            
-            if not all_applied:
-                return "全ての部屋の描写を生成してから次のフェーズに進んでください。", turn_text.value, phase_text.value
+            if not game_state.life_results.get(game_state.turn, {}).get("applied", False):
+                return "共同生活の描写を生成してから次のフェーズに進んでください。"
             
             # フェーズを進める
             turn, phase = game_state.next_phase()
-            return "次のフェーズに進みました。", f"{turn}/5", phase_name(phase)
+            
+            return f"次のフェーズに進みました。ターン{turn}、フェーズ{phase_name(phase)}"
         
         # イベント関連付け
         generate_btn.click(
             fn=generate_description,
             inputs=[room_select],
-            outputs=[description_area, emotion_changes, energy_display]
+            outputs=[description_area, emotion_changes, energy_display, status_display]
         )
-        
-
 
 # 感情ワークショップフェーズのUI
 def workshop_ui(game_state, llm_interface):
@@ -947,20 +985,16 @@ def workshop_ui(game_state, llm_interface):
         
         # イベントハンドラ
         def generate_workshop():
-            # 現在のテーマを取得
-            current_theme = workshop_themes[game_state.turn]
-            
-            # 既に生成済みなら取得
+            # 既に生成済みかチェック
             if game_state.turn in game_state.workshop_results:
-                description = game_state.workshop_results[game_state.turn]["description"]
-                emotion_text = game_state.workshop_results[game_state.turn].get("emotion_text", "感情変化情報がありません。")
                 return (
-                    description,
-                    emotion_text,
+                    game_state.workshop_results[game_state.turn]["description"],
+                    game_state.workshop_results[game_state.turn].get("emotion_text", "感情変化情報がありません。"),
                     str(game_state.noua_energy),
-                    f"今月のテーマ: {current_theme['title']}",
-                    current_theme['description']
+                    f"このターンのワークショップは既に生成済みです（ターン{game_state.turn}）"
                 )
+            
+            current_theme = workshop_themes[game_state.turn]
             
             # 現在の部屋割り情報を取得
             rooms_info = []
@@ -992,6 +1026,22 @@ def workshop_ui(game_state, llm_interface):
                 energy = game_state.calculate_noua_energy()
                 game_state.noua_energy = energy
                 
+                # ログの保存
+                log_text = f"""ワークショップ：{current_theme['title']}
+
+テーマ説明：
+{current_theme['description']}
+
+討論内容：
+{description}
+
+感情変化：
+{emotion_text}
+
+エネルギー：{energy}
+"""
+                save_log(game_state, log_text, "workshop")
+                
                 # 結果を保存
                 game_state.workshop_results[game_state.turn] = {
                     "description": description,
@@ -1004,8 +1054,7 @@ def workshop_ui(game_state, llm_interface):
                     description,
                     emotion_text,
                     str(energy),
-                    f"今月のテーマ: {current_theme['title']}",
-                    current_theme['description']
+                    f"ワークショップを生成し、ログに保存しました（ターン{game_state.turn}）"
                 )
                 
             except Exception as e:
@@ -1014,8 +1063,7 @@ def workshop_ui(game_state, llm_interface):
                     error_msg,
                     "感情変化を生成できませんでした。",
                     str(game_state.noua_energy),
-                    f"今月のテーマ: {current_theme['title']}",
-                    current_theme['description']
+                    "エラーが発生しました"
                 )
         
         # イベント関連付け
@@ -1026,14 +1074,14 @@ def workshop_ui(game_state, llm_interface):
         )
         
         def format_emotion_changes(emotion_result):
-            """感情変化データを読みやすい形式に整形"""
+            """感情変化データを統一された形式で表示"""
             if "error" in emotion_result:
                 return f"感情変化の抽出エラー: {emotion_result['error']}"
             
             if "emotion_changes" not in emotion_result or not emotion_result["emotion_changes"]:
                 return "感情変化を抽出できませんでした。"
             
-            emotion_text = "--- 感情変化の要約 ---\n"
+            formatted_text = "【感情変化】\n"
             for change in emotion_result["emotion_changes"]:
                 from_char = change["from"]
                 to_char = change["to"]
@@ -1045,13 +1093,13 @@ def workshop_ui(game_state, llm_interface):
                 love_sign = "+" if love_change > 0 else ("-" if love_change < 0 else "±")
                 hate_sign = "+" if hate_change > 0 else ("-" if hate_change < 0 else "±")
                 
-                # 絶対値を使用し、0の場合は0と表示
+                # 値が0の場合は±0と表示
                 love_value = abs(love_change) if love_change != 0 else 0
                 hate_value = abs(hate_change) if hate_change != 0 else 0
                 
-                emotion_text += f"- {from_char} → {to_char}: {reason} (愛情{love_sign}{love_value}/憎悪{hate_sign}{hate_value})\n"
+                formatted_text += f"- {from_char} → {to_char}: {reason} (愛情{love_sign}{love_value}/憎悪{hate_sign}{hate_value})\n"
             
-            return emotion_text
+            return formatted_text
         
         # 次のフェーズへ進む関数
         def proceed_to_next_phase():
@@ -1075,7 +1123,7 @@ def workshop_ui(game_state, llm_interface):
         )
         
 
-def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを追加
+def emotion_scan_ui(game_state, turn_display):
     with gr.Column():
         gr.Markdown("## 感情スキャン・評価フェーズ")
         gr.Markdown("各キャラクターの感情値と相互感情密度を評価します。")
@@ -1160,7 +1208,11 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
         )
         
         # 結果表示エリア
-        result_text = gr.Textbox(label="結果", interactive=False)
+        result_text = gr.Textbox(
+            label="結果",
+            interactive=False,
+            lines=10  # 行数を増やして結果を見やすく
+        )
         
         # ボタンエリア
         with gr.Row():
@@ -1170,9 +1222,77 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
             if game_state.turn < 5:
                 next_turn_btn = gr.Button("次のターンへ")
         
-        # イベントハンドラ
+        def format_game_results(pairs):
+            """ゲーム結果を整形する関数"""
+            result_text = "【ノウア連合 感情密度選抜計画 最終結果】\n\n"
+            
+            # エネルギー状況
+            result_text += f"最終ノウアエネルギー: {game_state.noua_energy}\n"
+            energy_evaluation = ""
+            if game_state.noua_energy >= 500:
+                energy_evaluation = "【極めて良好】感情の活性化に大きく貢献"
+            elif game_state.noua_energy >= 300:
+                energy_evaluation = "【良好】安定した感情の流れを実現"
+            elif game_state.noua_energy >= 100:
+                energy_evaluation = "【普通】基準を満たすエネルギーを確保"
+            else:
+                energy_evaluation = "【要注意】エネルギー不足の懸念あり"
+            result_text += f"評価: {energy_evaluation}\n\n"
+            
+            # 番の組み合わせ結果
+            result_text += "【番の組み合わせ結果】\n"
+            if not pairs:
+                result_text += "適切な番の組み合わせが見つかりませんでした。\n"
+            else:
+                for i, pair in enumerate(pairs, 1):
+                    char1, char2 = pair["characters"]
+                    result_text += f"\n第{i}番：{char1} ＆ {char2}\n"
+                    result_text += f"種類: {pair['type']}\n"
+                    result_text += f"感情密度: {pair['density']}\n"
+                    
+                    # 相互の感情状態を追加
+                    love1to2 = game_state.characters[char1].love_values.get(char2, 0)
+                    hate1to2 = game_state.characters[char1].hate_values.get(char2, 0)
+                    love2to1 = game_state.characters[char2].love_values.get(char1, 0)
+                    hate2to1 = game_state.characters[char2].hate_values.get(char1, 0)
+                    
+                    result_text += f"感情状態:\n"
+                    result_text += f"- {char1}→{char2}: 愛情{love1to2}/憎悪{hate1to2}\n"
+                    result_text += f"- {char2}→{char1}: 愛情{love2to1}/憎悪{hate2to1}\n"
+            
+            # 未成立の組み合わせ
+            unpaired = set(game_state.characters.keys())
+            for pair in pairs:
+                char1, char2 = pair["characters"]
+                unpaired.discard(char1)
+                unpaired.discard(char2)
+            
+            if unpaired:
+                result_text += "\n【未成立のキャラクター】\n"
+                for char in unpaired:
+                    # 最も感情密度の高かった相手を表示
+                    highest_density = 0
+                    best_partner = None
+                    for other in game_state.characters:
+                        if other != char:
+                            density = game_state.calculate_pair_density(char, other)
+                            if density > highest_density:
+                                highest_density = density
+                                best_partner = other
+                    
+                    result_text += f"{char}: "
+                    if best_partner:
+                        result_text += f"最も相性の良かった相手は{best_partner}（感情密度: {highest_density}）\n"
+                    else:
+                        result_text += "適切な相手が見つかりませんでした\n"
+            
+            # ログファイルの保存
+            save_log(game_state, result_text, "final_results")
+            
+            return result_text
+        
         def update_emotion_data():
-            # 感情マトリックスの更新データ
+            # 感情マトリックスの更新データを作成
             matrix_data = []
             for from_char in chars:
                 row_data = [from_char]
@@ -1185,7 +1305,7 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
             
             updated_emotion_df = pd.DataFrame(matrix_data, columns=matrix_columns)
             
-            # 相互感情密度の更新データ
+            # 相互感情密度の更新データを作成
             density_data = []
             densities = game_state.calculate_emotion_density()
             for pair, value in densities.items():
@@ -1200,8 +1320,15 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
             
             # エネルギー計算
             energy = int(game_state.calculate_noua_energy())
+            game_state.noua_energy = energy
             
-            # 番候補の更新データ
+            # 最終ターンの場合、番の組み合わせを計算
+            final_results = ""
+            if game_state.turn >= 5:
+                pairs, _ = game_state.calculate_pairs()
+                final_results = format_game_results(pairs)
+            
+            # 番候補の更新データを作成
             pair_data = []
             if game_state.turn >= 5:
                 pairs, _ = game_state.calculate_pairs()
@@ -1216,9 +1343,28 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
             
             updated_pair_df = pd.DataFrame(pair_data, columns=pair_columns)
             
-            return updated_emotion_df, updated_density_df, energy, updated_pair_df
+            return (
+                updated_emotion_df,
+                updated_density_df,
+                energy,
+                updated_pair_df,
+                final_results
+            )
         
-        # 次のターンに進む関数
+        # イベント関連付け
+        update_btn.click(
+            fn=update_emotion_data,
+            inputs=[],
+            outputs=[
+                emotion_matrix,
+                density_matrix,
+                energy_value,
+                pair_candidates,
+                result_text
+            ]
+        )
+        
+        # 次のターンに進む関数を定義
         def proceed_to_next_turn():
             if game_state.turn >= 5:
                 return "これ以上ターンを進めることはできません。", f"ターン {game_state.turn}/5"
@@ -1229,26 +1375,55 @@ def emotion_scan_ui(game_state, turn_display):  # turn_displayパラメータを
             
             # 部屋の割り当てをリセット
             for room in game_state.rooms.values():
-                room.occupants = []
-                room.roles = {}
+                room.clear_occupants()
             
-            return f"ターン{game_state.turn}に進みました。新しい部屋割りを行ってください。", f"ターン {game_state.turn}/5"
-        
-        # イベント関連付け
-        # 更新ボタンのイベント
-        update_btn.click(
-            fn=update_emotion_data,
-            inputs=[],
-            outputs=[emotion_matrix, density_matrix, energy_value, pair_candidates]
-        )
+            # 次のターンの開始をログに記録
+            log_text = f"""
+=== ターン{game_state.turn}開始 ===
+現在のノウアエネルギー: {game_state.noua_energy}
+
+キャラクター感情状態:
+"""
+            for char_name, char in game_state.characters.items():
+                log_text += f"\n{char_name}の感情値:\n"
+                for target, love in char.love_values.items():
+                    hate = char.hate_values.get(target, 0)
+                    log_text += f"→ {target}: 愛情{love}/憎悪{hate}\n"
+            
+            save_log(game_state, log_text, f"turn{game_state.turn}_start")
+            
+            return (
+                f"ターン{game_state.turn}に進みました。新しい部屋割りを行ってください。",
+                f"ターン {game_state.turn}/5"
+            )
         
         # 次のターンへ進むボタンのイベント（最終ターン以外で表示）
         if game_state.turn < 5:
             next_turn_btn.click(
                 fn=proceed_to_next_turn,
                 inputs=[],
-                outputs=[result_text, turn_display]  # メインUIのターン表示を更新
+                outputs=[result_text, turn_display]
             )
+
+def save_log(game_state, log_text, log_type):
+    """ログをファイルに保存する関数"""
+    # ログディレクトリの作成
+    log_dir = "./data/logs"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # ファイル名の生成（タイムスタンプ付き）
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"turn{game_state.turn}_{log_type}_{timestamp}.txt"
+    filepath = os.path.join(log_dir, filename)
+    
+    # ログの保存
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(f"ターン: {game_state.turn}/5\n")
+        f.write(f"タイプ: {log_type}\n")
+        f.write("="*50 + "\n")
+        f.write(log_text)
+    
+    return filepath
 
 # メインアプリケーション
 def main():

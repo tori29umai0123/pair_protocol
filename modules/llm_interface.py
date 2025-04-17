@@ -63,186 +63,177 @@ class LLMInterface:
 
     def extract_emotion_changes(self, description):
         """描写から感情変化を抽出"""
-        # 描写から感情変化の要約部分を抽出する試み
-        emotion_summary = ""
-        if "--- 感情変化の要約 ---" in description:
-            parts = description.split("--- 感情変化の要約 ---")
-            if len(parts) > 1:
-                emotion_summary = parts[1].strip()
+        # 感情変化セクションを探す
+        emotion_markers = [
+            "【感情変化】",
+            "--- 感情変化の要約 ---",
+            "感情変化："
+        ]
         
-        # 既に要約がある場合、それをパースする
-        if emotion_summary:
-            changes = []
-            lines = emotion_summary.strip().split("\n")
-            for line in lines:
-                line = line.strip()
-                if not line:
+        emotion_section = None
+        for marker in emotion_markers:
+            if marker in description:
+                parts = description.split(marker)
+                if len(parts) > 1:
+                    emotion_section = parts[1].strip()
+                    break
+        
+        if not emotion_section:
+            return {"error": "感情変化セクションが見つかりませんでした"}
+
+        # 感情変化をパースする
+        changes = []
+        current_lines = emotion_section.split('\n')
+        
+        for line in current_lines:
+            line = line.strip()
+            if not line or line.startswith('==='):
+                continue
+            
+            # 行頭の記号を削除
+            if line.startswith('-') or line.startswith('•') or line.startswith('*'):
+                line = line[1:].strip()
+            
+            try:
+                # キャラクター名と説明を分離
+                if ' → ' not in line and ' -> ' not in line:
                     continue
                     
-                # 行の先頭の記号を削除（- や • など）
-                if line.startswith("-") or line.startswith("•") or line.startswith("*"):
-                    line = line[1:].strip()
+                # 矢印の表記ゆれに対応
+                line = line.replace('->', '→')
+                chars_part, rest = line.split(':', 1) if ':' in line else (line, '')
+                chars_part = chars_part.strip()
                 
-                # 典型的なフォーマットをパース: "キャラ1 → キャラ2: 説明 (愛情+X/憎悪+Y)"
-                if " → " in line and ("愛情" in line or "憎悪" in line):
-                    try:
-                        # キャラクター名の抽出
-                        chars_part, explanation = line.split(":", 1) if ":" in line else (line, "")
-                        chars_part = chars_part.strip()
-                        if " → " in chars_part:
-                            from_char, to_char = chars_part.split(" → ")
+                from_char, to_char = chars_part.split('→')
+                from_char = from_char.strip()
+                to_char = to_char.strip()
+                
+                # 感情値の変化を抽出
+                rest = rest.strip()
+                love_change = 0
+                hate_change = 0
+                
+                # 括弧内の感情値を探す
+                import re
+                value_pattern = r'[（(](愛情[+\-±]?\d*\s*[/／]?\s*憎悪[+\-±]?\d*)[）)]'
+                value_match = re.search(value_pattern, rest)
+                
+                if value_match:
+                    values_str = value_match.group(1)
+                    # 理由は括弧の前の部分
+                    reason = rest[:value_match.start()].strip()
+                    
+                    # 愛情と憎悪の値を分離
+                    values_str = values_str.replace('／', '/') # スラッシュの表記ゆれ対応
+                    if '/' in values_str:
+                        love_str, hate_str = values_str.split('/')
+                    else:
+                        love_str = values_str
+                        hate_str = "憎悪±0"
+                    
+                    # 愛情値の解析
+                    love_match = re.search(r'愛情([+\-±]\d+|\d+|[+\-])', love_str)
+                    if love_match:
+                        love_val = love_match.group(1)
+                        if love_val == '+':
+                            love_change = 10
+                        elif love_val == '-':
+                            love_change = -10
+                        elif love_val == '±' or love_val == '0':
+                            love_change = 0
                         else:
-                            continue  # 正しい形式でない場合はスキップ
-                        
-                        # 変化値の抽出 - カッコ内の部分を探す
-                        explanation = explanation.strip()
-                        love_change = 0
-                        hate_change = 0
-                        
-                        # カッコ処理の統一
-                        import re
-                        # 日本語の括弧も英語の括弧も両方対応
-                        bracket_pattern = r'[（(](.*?)[）)]'
-                        bracket_match = re.search(bracket_pattern, explanation)
-                        
-                        if bracket_match:
-                            # カッコ内の部分を取得
-                            values_part = bracket_match.group(1)
-                            # カッコの前の部分を理由として取得
-                            reason = explanation[:bracket_match.start()].strip()
-                        else:
-                            # カッコがない場合は説明文全体を理由とし、最後の部分に感情値があるか確認
-                            reason = explanation
-                            # 説明文の最後に愛情/憎悪の値があるかチェック
-                            words = explanation.split()
-                            values_part = ""
-                            if words and ("愛情" in words[-1] or "憎悪" in words[-1]):
-                                values_part = words[-1]
-                                reason = " ".join(words[:-1]).strip()
-                        
-                        # 変化量を解析
-                        if values_part:
-                            if "/" in values_part:
-                                love_part, hate_part = values_part.split("/", 1)
+                            if love_val.startswith('+'):
+                                love_change = int(love_val[1:])
+                            elif love_val.startswith('-'):
+                                love_change = -int(love_val[1:])
+                            elif love_val.startswith('±'):
+                                love_change = 0
                             else:
-                                love_part, hate_part = values_part, "憎悪±0"
-                            
-                            # 愛情変化量を解析
-                            if "愛情" in love_part:
-                                love_value_str = love_part.replace("愛情", "").strip()
-                                if "++" in love_value_str:
-                                    love_change = 20  # ++ は大きな増加
-                                elif "++" in love_value_str:
-                                    love_change = -20  # -- は大きな減少
-                                elif "+" in love_value_str:
-                                    try:
-                                        love_change = int(love_value_str.replace("+", ""))
-                                    except ValueError:
-                                        love_change = 10  # 数値化できない場合はデフォルト
-                                elif "-" in love_value_str:
-                                    try:
-                                        love_change = -int(love_value_str.replace("-", ""))
-                                    except ValueError:
-                                        love_change = -10  # 数値化できない場合はデフォルト
-                                elif "±" in love_value_str:
-                                    love_change = 0  # ±0 は変化なし
-                            
-                            # 憎悪変化量を解析
-                            if "憎悪" in hate_part:
-                                hate_value_str = hate_part.replace("憎悪", "").strip()
-                                if "++" in hate_value_str:
-                                    hate_change = 20  # ++ は大きな増加
-                                elif "++" in hate_value_str:
-                                    hate_change = -20  # -- は大きな減少
-                                elif "+" in hate_value_str:
-                                    try:
-                                        hate_change = int(hate_value_str.replace("+", ""))
-                                    except ValueError:
-                                        hate_change = 10  # 数値化できない場合はデフォルト
-                                elif "-" in hate_value_str:
-                                    try:
-                                        hate_change = -int(hate_value_str.replace("-", ""))
-                                    except ValueError:
-                                        hate_change = -10  # 数値化できない場合はデフォルト
-                                elif "±" in hate_value_str:
-                                    hate_change = 0  # ±0 は変化なし
-                        
-                        changes.append({
-                            "from": from_char,
-                            "to": to_char,
-                            "love_change": love_change,
-                            "hate_change": hate_change,
-                            "reason": reason
-                        })
-                    except Exception as e:
-                        print(f"感情変化の解析エラー: {e} - {line}")
-                        continue
-            
-            if changes:
-                return {"emotion_changes": changes}
+                                love_change = int(love_val)
+                    
+                    # 憎悪値の解析
+                    hate_match = re.search(r'憎悪([+\-±]\d+|\d+|[+\-])', hate_str)
+                    if hate_match:
+                        hate_val = hate_match.group(1)
+                        if hate_val == '+':
+                            hate_change = 10
+                        elif hate_val == '-':
+                            hate_change = -10
+                        elif hate_val == '±' or hate_val == '0':
+                            hate_change = 0
+                        else:
+                            if hate_val.startswith('+'):
+                                hate_change = int(hate_val[1:])
+                            elif hate_val.startswith('-'):
+                                hate_change = -int(hate_val[1:])
+                            elif hate_val.startswith('±'):
+                                hate_change = 0
+                            else:
+                                hate_change = int(hate_val)
+                else:
+                    # 括弧がない場合は説明文全体を理由とする
+                    reason = rest
+                
+                changes.append({
+                    "from": from_char,
+                    "to": to_char,
+                    "love_change": love_change,
+                    "hate_change": hate_change,
+                    "reason": reason
+                })
+                
+            except Exception as e:
+                print(f"行のパースでエラー: {e} - {line}")
+                continue
         
-        # 要約がないか解析に失敗した場合、OpenAIに感情変化の抽出を依頼
+        if changes:
+            return {"emotion_changes": changes}
+        
+        # パースに失敗した場合、LLMに解析を依頼
+        return self._extract_emotions_with_llm(description)
+
+    def _extract_emotions_with_llm(self, description):
+        """LLMを使用して感情変化を抽出"""
         prompt = f"""
-    以下の描写から、キャラクター間の感情変化を抽出してください。
-    変化を数値で表現し、JSON形式で出力してください。
-    キャラクターの価値観や性格に基づいて、感情変化を評価してください。
+以下の描写から、キャラクター間の感情変化を抽出し、JSON形式で出力してください。
+出力は以下の形式に厳密に従ってください：
 
-    描写:
-    {description}
-
-    出力形式:
-    {{
+{{
     "emotion_changes": [
         {{
-        "from": "キャラクター名1",
-        "to": "キャラクター名2",
-        "love_change": 感情値変化（整数）,
-        "hate_change": 憎悪値変化（整数）,
-        "reason": "理由の簡潔な説明"
+            "from": "キャラクター名1",
+            "to": "キャラクター名2",
+            "love_change": 数値,
+            "hate_change": 数値,
+            "reason": "変化の理由"
         }},
         ...
     ]
-    }}
-    """
+}}
+
+描写:
+{description}
+"""
+        
         try:
             response = openai.ChatCompletion.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "あなたは感情分析AIです。文章から感情変化を抽出してJSON形式で出力してください。キャラクターの価値観や性格を考慮して判断してください。"},
+                    {"role": "system", "content": "感情変化を正確にJSONとして抽出するアシスタントです。"},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,  # 一貫性のために低い温度
-                max_tokens=1000
+                temperature=0.3
             )
             
-            # 応答からJSONを抽出
             content = response.choices[0].message.content
             
             try:
-                # まずそのままJSONとして解析を試みる
-                result = json.loads(content)
-                return result
+                # JSONとしてパース
+                return json.loads(content)
             except json.JSONDecodeError:
-                # JSONの部分だけを抽出
-                json_str = ""
-                in_json = False
-                for line in content.split('\n'):
-                    if line.strip() == '{':
-                        in_json = True
-                    if in_json:
-                        json_str += line + "\n"
-                    if line.strip() == '}':
-                        in_json = False
-                
-                if json_str:
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                        pass
-                
-                # 最後の手段: JSONっぽい部分を正規表現で抽出
+                # JSONの部分だけを抽出して再試行
                 import re
-                json_pattern = r'\{[\s\S]*?\}'
+                json_pattern = r'\{[\s\S]*\}'
                 match = re.search(json_pattern, content)
                 if match:
                     try:
@@ -253,8 +244,7 @@ class LLMInterface:
                 return {"error": "JSONの解析に失敗しました", "raw_content": content}
             
         except Exception as e:
-            return {"error": f"APIエラー: {str(e)}"}
-
+            return {"error": f"LLMによる抽出に失敗: {str(e)}"}
 
     def _format_values(self, values):
         """価値観情報を文字列に変換"""
